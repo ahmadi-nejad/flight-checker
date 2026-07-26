@@ -2,8 +2,13 @@ name: Check Flights
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # هر 5 دقیقه یکبار اجرا می‌شه (زمان‌ها به وقت UTC هستن)
+    - cron: "*/5 * * * *"
   workflow_dispatch:
+
+concurrency:
+  group: check-flights
+  cancel-in-progress: false
 
 jobs:
   check:
