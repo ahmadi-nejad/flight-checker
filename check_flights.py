@@ -1,13 +1,138 @@
 
-
 import json
 import os
+import re
 from playwright.sync_api import sync_playwright
 import requests
 
-# ---------- تنظیمات ----------
-# مسیرها و تاریخ‌ها دیگه اینجا نوشته نمی‌شن (که توی Public repo دیده نشن).
-# به‌جاش از متغیر مخفی FLIGHT_CONFIG خونده می‌شن.
+STATE_FILE = "state.json"
+
+# ---------------------------------------------------------------------
+# Flytoday
+# ---------------------------------------------------------------------
+
+FLYTODAY_NOT_FOUND_PHRASES = [
+    "یافت نشد",
+    "پروازی موجود نیست",
+    "پروازی پیدا نشد",
+    "متاسفانه",
+    "نتیجه‌ای پیدا نشد",
+    "نتیجه ای یافت نشد",
+    "تکمیل شده",
+    "ظرفیت پروازها در این تاریخ تکمیل شده",
+]
+
+
+def build_flytoday_url(origin: str, destination: str, date: str) -> str:
+    return (
+        f"https://www.flytoday.ir/flight/search?"
+        f"departure={origin},1&arrival={destination},1"
+        f"&departureDate={date}&adt=1&chd=0&inf=0&cabin=1&isAnyWhere=false"
+    )
+
+
+def check_flytoday(page, origin: str, destination: str, date: str) -> bool:
+    url = build_flytoday_url(origin, destination, date)
+    page.goto(url, timeout=60000)
+    page.wait_for_timeout(15000)
+
+    text = page.inner_text("body")
+    has_not_found = any(phrase in text for phrase in FLYTODAY_NOT_FOUND_PHRASES)
+    has_price_hint = ("تومان" in text) or ("ریال" in text)
+
+    return has_price_hint and not has_not_found
+
+
+# ---------------------------------------------------------------------
+# Iran Air (ebooking.iranair.com)
+# ---------------------------------------------------------------------
+
+IRANAIR_HOME_URL = "https://ebooking.iranair.com/ibe/IR/home/?language=fa#searchForm"
+
+
+def julian_day_number(date_str: str) -> int:
+    """محاسبه Julian Day Number استاندارد برای یه تاریخ میلادی (YYYY-MM-DD)."""
+    y, m, d = map(int, date_str.split("-"))
+    a = (14 - m) // 12
+    y2 = y + 4800 - a
+    m2 = m + 12 * a - 3
+    return (
+        d
+        + (153 * m2 + 2) // 5
+        + 365 * y2
+        + y2 // 4
+        - y2 // 100
+        + y2 // 400
+        - 32045
+    )
+
+
+def iranair_calendar_value(date_str: str) -> str:
+    """عددی که سایت ایران‌ایر توی کلاس روزهای تقویم استفاده می‌کنه (jdXXXXXXX.5)."""
+    jdn = julian_day_number(date_str)
+    value = jdn - 0.5
+    return str(value)
+
+
+def set_iranair_autocomplete(page, input_id: str, code: str) -> None:
+    page.click(f"#{input_id}")
+    page.fill(f"#{input_id}", "")
+    page.type(f"#{input_id}", code, delay=120)
+    page.wait_for_timeout(1200)
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(300)
+
+
+def to_iranair_date_format(date_str: str) -> str:
+    """تبدیل 2026-07-27 به همون فرمتی که ایران‌ایر توی data-date استفاده می‌کنه (27/07/2026)."""
+    y, m, d = date_str.split("-")
+    return f"{d}/{m}/{y}"
+
+
+def check_iranair(page, origin: str, destination: str, date: str) -> bool:
+    page.goto(IRANAIR_HOME_URL, timeout=60000)
+    page.wait_for_timeout(3000)
+
+    set_iranair_autocomplete(page, "PRSF_from", origin)
+    set_iranair_autocomplete(page, "PRSF_to", destination)
+
+    # باز کردن تقویم و انتخاب روز درست
+    page.click("#PRSF_dep_date")
+    page.wait_for_timeout(800)
+    jd_value = iranair_calendar_value(date)
+    day_selector = f'a[class*="jd{jd_value}"]'
+    try:
+        page.click(day_selector, timeout=5000)
+    except Exception as e:
+        print(f"نتونستم روز {date} رو توی تقویم ایران‌ایر پیدا کنم: {e}")
+        return False
+
+    page.wait_for_timeout(500)
+    page.click("#PRSF_search_form_do")
+    page.wait_for_timeout(15000)
+
+    # این سایت یه هفته کامل تاریخ رو با هم نشون می‌ده (تب‌های بالای نتایج)،
+    # پس باید دقیقاً همون تب مربوط به تاریخ درخواستی رو پیدا کنیم، نه کل صفحه.
+    target = to_iranair_date_format(date)
+    tab_selector = f'a[data-date="{target}"]'
+    try:
+        tab = page.locator(tab_selector).first
+        class_attr = tab.get_attribute("class") or ""
+        tab_text = tab.inner_text()
+    except Exception as e:
+        print(f"نتونستم تب تاریخ {date} رو توی نتایج ایران‌ایر پیدا کنم: {e}")
+        return False
+
+    if "no-flights-day" in class_attr:
+        return False
+
+    return "ریال" in tab_text
+
+
+# ---------------------------------------------------------------------
+# منطق مشترک
+# ---------------------------------------------------------------------
 
 
 def load_config():
@@ -20,39 +145,18 @@ def load_config():
     return data["routes"], data["dates"]
 
 
-NOT_FOUND_PHRASES = [
-    "یافت نشد",
-    "پروازی موجود نیست",
-    "پروازی پیدا نشد",
-    "متاسفانه",
-    "نتیجه‌ای پیدا نشد",
-    "نتیجه ای یافت نشد",
-    "تکمیل شده",
-    "ظرفیت پروازها در این تاریخ تکمیل شده",
-]
-
-STATE_FILE = "state.json"
+def check_route(page, route: dict, date: str) -> bool:
+    site = route.get("site", "flytoday")
+    if site == "iranair":
+        return check_iranair(page, route["origin"], route["destination"], date)
+    return check_flytoday(page, route["origin"], route["destination"], date)
 
 
-def build_url(origin: str, destination: str, date: str) -> str:
-    return (
-        f"https://www.flytoday.ir/flight/search?"
-        f"departure={origin},1&arrival={destination},1"
-        f"&departureDate={date}&adt=1&chd=0&inf=0&cabin=1&isAnyWhere=false"
-    )
-
-
-def check_flight(page, origin: str, destination: str, date: str) -> bool:
-    url = build_url(origin, destination, date)
-    page.goto(url, timeout=60000)
-    page.wait_for_timeout(15000)
-
-    text = page.inner_text("body")
-
-    has_not_found = any(phrase in text for phrase in NOT_FOUND_PHRASES)
-    has_price_hint = ("تومان" in text) or ("ریال" in text)
-
-    return has_price_hint and not has_not_found
+def link_for(route: dict, date: str) -> str:
+    site = route.get("site", "flytoday")
+    if site == "iranair":
+        return IRANAIR_HOME_URL
+    return build_flytoday_url(route["origin"], route["destination"], date)
 
 
 def load_state() -> dict:
@@ -86,12 +190,11 @@ def main() -> None:
         page = browser.new_page()
 
         for route in routes:
+            site = route.get("site", "flytoday")
             for date in dates:
-                key = f"{route['origin']}-{route['destination']}-{date}"
+                key = f"{site}-{route['origin']}-{route['destination']}-{date}"
                 try:
-                    available = check_flight(
-                        page, route["origin"], route["destination"], date
-                    )
+                    available = check_route(page, route, date)
                 except Exception as e:
                     print(f"خطا در چک کردن {key}: {e}")
                     continue
@@ -101,9 +204,10 @@ def main() -> None:
                 if available and not previous:
                     msg = (
                         "✈️ پرواز جدید پیدا شد!\n"
-                        f"مسیر: {route['label']}\n"
+                        f"سایت: {site}\n"
+                        f"مسیر: {route.get('label', key)}\n"
                         f"تاریخ: {date}\n"
-                        f"لینک: {build_url(route['origin'], route['destination'], date)}"
+                        f"لینک: {link_for(route, date)}"
                     )
                     send_telegram(msg)
                     changed = True
