@@ -2,7 +2,6 @@ name: Check Flights
 
 on:
   schedule:
-    # هر 5 دقیقه یکبار اجرا می‌شه (زمان‌ها به وقت UTC هستن)
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
@@ -34,6 +33,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FLIGHT_CONFIG: ${{ secrets.FLIGHT_CONFIG }}
+          IRAN_PROXY_SERVER: ${{ secrets.IRAN_PROXY_SERVER }}
+          IRAN_PROXY_USERNAME: ${{ secrets.IRAN_PROXY_USERNAME }}
+          IRAN_PROXY_PASSWORD: ${{ secrets.IRAN_PROXY_PASSWORD }}
         run: python check_flights.py
 
       - name: Commit updated state
