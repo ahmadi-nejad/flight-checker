@@ -1,3 +1,7 @@
+"""
+اسکریپت چک کردن موجود بودن پرواز روی چند سایت (Flytoday و ایران‌ایر)
+و اطلاع‌رسانی در تلگرام.
+"""
 
 import json
 import os
@@ -97,7 +101,6 @@ def check_iranair(page, origin: str, destination: str, date: str) -> bool:
     set_iranair_autocomplete(page, "PRSF_from", origin)
     set_iranair_autocomplete(page, "PRSF_to", destination)
 
-    # باز کردن تقویم و انتخاب روز درست
     page.click("#PRSF_dep_date")
     page.wait_for_timeout(800)
     jd_value = iranair_calendar_value(date)
@@ -112,8 +115,6 @@ def check_iranair(page, origin: str, destination: str, date: str) -> bool:
     page.click("#PRSF_search_form_do")
     page.wait_for_timeout(15000)
 
-    # این سایت یه هفته کامل تاریخ رو با هم نشون می‌ده (تب‌های بالای نتایج)،
-    # پس باید دقیقاً همون تب مربوط به تاریخ درخواستی رو پیدا کنیم، نه کل صفحه.
     target = to_iranair_date_format(date)
     tab_selector = f'a[data-date="{target}"]'
     try:
@@ -180,6 +181,21 @@ def send_telegram(message: str) -> None:
         print("خطا در ارسال پیام تلگرام:", resp.text)
 
 
+def get_iran_proxy_config():
+    """اگه Secretهای پراکسی تنظیم شده باشن، تنظیمات پراکسی رو برمی‌گردونه، وگرنه None."""
+    server = os.environ.get("IRAN_PROXY_SERVER")
+    if not server:
+        return None
+    config = {"server": server}
+    username = os.environ.get("IRAN_PROXY_USERNAME")
+    password = os.environ.get("IRAN_PROXY_PASSWORD")
+    if username:
+        config["username"] = username
+    if password:
+        config["password"] = password
+    return config
+
+
 def main() -> None:
     routes, dates = load_config()
     state = load_state()
@@ -187,10 +203,20 @@ def main() -> None:
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
+
+        default_context = browser.new_context()
+        default_page = default_context.new_page()
+
+        proxy_config = get_iran_proxy_config()
+        if proxy_config:
+            iranair_context = browser.new_context(proxy=proxy_config)
+            iranair_page = iranair_context.new_page()
+        else:
+            iranair_page = default_page
 
         for route in routes:
             site = route.get("site", "flytoday")
+            page = iranair_page if site == "iranair" else default_page
             for date in dates:
                 key = f"{site}-{route['origin']}-{route['destination']}-{date}"
                 try:
